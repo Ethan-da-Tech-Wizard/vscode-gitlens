@@ -1,13 +1,14 @@
 import { l10n, ThemeIcon, window } from 'vscode';
 import { CherryPickError, SigningError } from '@gitlens/git/errors.js';
 import type { GitBranch } from '@gitlens/git/models/branch.js';
+import { GitCommit } from '@gitlens/git/models/commit.js';
 import type { GitLog } from '@gitlens/git/models/log.js';
 import type { ConflictDetectionResult } from '@gitlens/git/models/mergeConflicts.js';
 import type { GitPausedOperationStatus } from '@gitlens/git/models/pausedOperationStatus.js';
 import type { GitReference } from '@gitlens/git/models/reference.js';
 import { getConflictDetectionErrorDisplayMessage } from '@gitlens/git/utils/mergeConflicts.utils.js';
 import { getReferenceLabel, isRevisionReference } from '@gitlens/git/utils/reference.utils.js';
-import { createRevisionRange } from '@gitlens/git/utils/revision.utils.js';
+import { createRevisionRange, shortenRevision } from '@gitlens/git/utils/revision.utils.js';
 import { ensureArray } from '@gitlens/utils/array.js';
 import { Logger } from '@gitlens/utils/logger.js';
 import { formatPlural } from '@gitlens/utils/plural.js';
@@ -16,7 +17,8 @@ import { showPausedOperationStatus, skipPausedOperation } from '../../git/action
 import type { GlRepository } from '../../git/models/repository.js';
 import { showGitErrorMessage } from '../../messages.js';
 import { isSubscriptionTrialOrPaidFromState } from '../../plus/gk/utils/subscription.utils.js';
-import { createQuickPickSeparator } from '../../quickpicks/items/common.js';
+import type { QuickPickItemOfT } from '../../quickpicks/items/common.js';
+import { createQuickPickItemOfT, createQuickPickSeparator } from '../../quickpicks/items/common.js';
 import type { DirectiveQuickPickItem } from '../../quickpicks/items/directive.js';
 import { createDirectiveQuickPickItem, Directive } from '../../quickpicks/items/directive.js';
 import type { FlagsQuickPickItem } from '../../quickpicks/items/flags.js';
@@ -38,12 +40,18 @@ import { pickCommitsStep } from '../quick-wizard/steps/commits.js';
 import { pickBranchOrTagStep } from '../quick-wizard/steps/references.js';
 import { canSkipRepositoryPick, pickRepositoryStep } from '../quick-wizard/steps/repositories.js';
 import { StepsController } from '../quick-wizard/stepsController.js';
-import { appendReposToTitle, assertStepState, canPickStepContinue } from '../quick-wizard/utils/steps.utils.js';
+import {
+	appendReposToTitle,
+	assertStepState,
+	canPickStepContinue,
+	createPickStep,
+} from '../quick-wizard/utils/steps.utils.js';
 
 const Steps = {
 	PickRepo: 'cherry-pick-pick-repo',
 	PickBranchOrTag: 'cherry-pick-pick-branch-or-tag',
 	PickCommits: 'cherry-pick-pick-commits',
+	PickMainline: 'cherry-pick-pick-mainline',
 	Confirm: 'cherry-pick-confirm',
 } as const;
 type StepNames = (typeof Steps)[keyof typeof Steps];
@@ -63,6 +71,7 @@ interface State<Repo = string | GlRepository, Refs = GitReference | GitReference
 	repo: Repo;
 	references: Refs;
 	flags: Flags[];
+	mainline?: number;
 }
 
 export interface CherryPickGitCommandArgs {
@@ -91,6 +100,7 @@ export class CherryPickGitCommand extends QuickCommand<State> {
 				state.references.map(c => c.ref),
 				{
 					edit: state.flags.includes('--edit'),
+					mainline: state.mainline,
 					noCommit: state.flags.includes('--no-commit'),
 				},
 			);
@@ -325,6 +335,32 @@ export class CherryPickGitCommand extends QuickCommand<State> {
 
 			assertStepState<State<GlRepository, GitReference[]>>(state);
 
+			const commits = await Promise.all(
+				state.references.map(async ref =>
+					GitCommit.is(ref) ? ref : state.repo.git.commits.getCommit(ref.ref),
+				),
+			);
+			const merge = commits.find(commit => commit != null && commit.parents.length > 1);
+			if (merge == null) {
+				state.mainline = undefined;
+			} else {
+				// Git applies --mainline to every commit in the batch. A non-merge commit only supports
+				// parent 1, while root commits ignore the option entirely.
+				const parentCount = commits.reduce(
+					(count, commit) => Math.min(count, commit?.parents.length || count),
+					merge.parents.length,
+				);
+				using step = steps.enterStep(Steps.PickMainline);
+				const result = yield* this.pickMainlineStep(state, context, merge.parents.slice(0, parentCount));
+				if (result === StepResultBreak) {
+					state.mainline = undefined;
+					if (step.goBack() == null) break;
+					continue;
+				}
+
+				state.mainline = result;
+			}
+
 			if (this.confirm(state.confirm)) {
 				using step = steps.enterStep(Steps.Confirm);
 
@@ -343,6 +379,38 @@ export class CherryPickGitCommand extends QuickCommand<State> {
 		}
 
 		return steps.isComplete ? undefined : StepResultBreak;
+	}
+
+	private async *pickMainlineStep(
+		state: StepState<State<GlRepository, GitReference[]>>,
+		context: Context,
+		parents: string[],
+	): AsyncStepResultGenerator<number> {
+		const singleCommit = state.references.length === 1;
+		const items = await Promise.all(
+			parents.map(async (parent, index) => {
+				const commit = singleCommit ? await state.repo.git.commits.getCommit(parent) : undefined;
+				return createQuickPickItemOfT(
+					{
+						label: l10n.t('Parent {0}', index + 1),
+						description: singleCommit ? shortenRevision(parent) : undefined,
+						detail: singleCommit
+							? commit?.summary
+							: l10n.t('Apply each selected commit relative to parent {0}', index + 1),
+						picked: state.mainline === index + 1,
+					},
+					index + 1,
+				);
+			}),
+		);
+		const step = createPickStep<QuickPickItemOfT<number>>({
+			title: appendReposToTitle(l10n.t('Cherry Pick — Choose Mainline Parent'), state, context),
+			placeholder: l10n.t('Choose the parent to use as the base for the selected changes'),
+			items: items,
+			canGoBack: context.steps?.canGoBack,
+		});
+		const selection: StepSelection<typeof step> = yield step;
+		return canPickStepContinue(step, state, selection) ? selection[0].item : StepResultBreak;
 	}
 
 	private async *confirmStep(
@@ -388,7 +456,7 @@ export class CherryPickGitCommand extends QuickCommand<State> {
 				ensureArray(state.references)
 					.map(r => r.ref)
 					.reverse(),
-				{ stopOnFirstConflict: true },
+				{ mainline: state.mainline, stopOnFirstConflict: true },
 			);
 		}
 

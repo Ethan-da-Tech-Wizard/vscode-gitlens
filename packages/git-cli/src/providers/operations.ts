@@ -96,7 +96,7 @@ export class OperationsGitSubProvider implements GitOperationsSubProvider {
 	async cherryPick(
 		repoPath: string,
 		revs: string[],
-		options?: { edit?: boolean; noCommit?: boolean; source?: unknown },
+		options?: { edit?: boolean; mainline?: number; noCommit?: boolean; source?: unknown },
 		runOptions?: GitOperationRunOptions,
 	): Promise<GitOperationResult> {
 		const scope = getScopedLogger();
@@ -104,6 +104,9 @@ export class OperationsGitSubProvider implements GitOperationsSubProvider {
 		const args = ['cherry-pick'];
 		if (options?.edit) {
 			args.push('-e');
+		}
+		if (options?.mainline != null) {
+			args.push('-m', String(options.mainline));
 		}
 		if (options?.noCommit) {
 			args.push('-n');

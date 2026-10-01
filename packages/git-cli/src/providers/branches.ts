@@ -1226,18 +1226,18 @@ export class BranchesGitSubProvider implements GitBranchesSubProvider {
 		repoPath: string,
 		targetBranch: string,
 		shas: string[],
-		options?: { stopOnFirstConflict?: boolean },
+		options?: { mainline?: number; stopOnFirstConflict?: boolean },
 		cancellation?: AbortSignal,
 	): Promise<ConflictDetectionResult> {
 		if (!shas.length) return { status: 'clean' };
 
-		const cacheKey: ConflictDetectionCacheKey = `apply:${targetBranch}:${shas.join(',')}:${options?.stopOnFirstConflict ?? false}`;
+		const cacheKey: ConflictDetectionCacheKey = `apply:${targetBranch}:${shas.join(',')}:${options?.stopOnFirstConflict ?? false}:${options?.mainline ?? 1}`;
 		return this.cache.conflictDetection.getOrCreate(
 			repoPath,
 			cacheKey,
 			async (_cacheable, signal) => {
 				// Resolve all parent refs in a single call - fails if any commit is a root commit (no parent)
-				const parentRefs = shas.map(c => `${c}^`);
+				const parentRefs = shas.map(c => `${c}^${options?.mainline ?? ''}`);
 				let parentShas: string[];
 				try {
 					const result = await this.git.run(

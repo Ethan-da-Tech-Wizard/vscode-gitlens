@@ -34,7 +34,7 @@ export interface GitOperationsSubProvider {
 	cherryPick(
 		repoPath: string,
 		revs: string[],
-		options?: { edit?: boolean; noCommit?: boolean; source?: unknown },
+		options?: { edit?: boolean; mainline?: number; noCommit?: boolean; source?: unknown },
 		runOptions?: GitOperationRunOptions,
 	): Promise<GitOperationResult>;
 	commit(

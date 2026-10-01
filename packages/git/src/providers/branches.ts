@@ -93,7 +93,7 @@ export interface GitBranchesSubProvider {
 		repoPath: string,
 		targetBranch: string,
 		shas: string[],
-		options?: { stopOnFirstConflict?: boolean },
+		options?: { mainline?: number; stopOnFirstConflict?: boolean },
 		cancellation?: AbortSignal,
 	): Promise<ConflictDetectionResult>;
 	getPotentialMergeConflicts?(
